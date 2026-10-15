@@ -1,0 +1,36 @@
+{
+  "name": "dsh-quota-pill",
+  "version": "0.1.7",
+  "private": true,
+  "type": "module",
+  "description": "Shows the DeepSeek account balance and the current Session's credit spend beside the shipped composer stats.",
+  "files": [
+    "client.js",
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "verify"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "meta": {
+    "title": "Quota Pill",
+    "description": "Shows account balance and this Session's credit spend under the composer."
+  }
+}

@@ -1,0 +1,5 @@
+# Loader patch for the local quota pill bundle. One row; its Host half exists only
+# so the package is a well-formed plugin entry, all rendering is the Client half.
+- insert:
+    - id: quota-pill
+      name: dsh-quota-pill
