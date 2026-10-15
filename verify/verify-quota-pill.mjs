@@ -381,9 +381,20 @@ check('01:00Z is off-peak under UTC rules', testApi.isPeakAt(Date.parse('2026-10
 
 /* ---------------- list prices ---------------- */
 
-check('rate formatting keeps significant decimals', testApi.formatRate(0.02), '\u00a50.02');
-check('rate formatting drops decimals for whole yuan', testApi.formatRate(2), '\u00a52');
-check('rate formatting keeps one decimal', testApi.formatRate(4.5), '\u00a54.5');
+// Every rate keeps two decimals, so the three rows stay aligned whatever the magnitude.
+check('rate formatting keeps two decimals on a cent rate', testApi.formatRate(0.02), '\u00a50.02');
+check('rate formatting pads whole yuan', testApi.formatRate(2), '\u00a52.00');
+check('rate formatting pads one decimal', testApi.formatRate(4.5), '\u00a54.50');
+check('rate formatting pads a large rate', testApi.formatRate(27), '\u00a527.00');
+check('rate formatting keeps a hundredth', testApi.formatRate(13.5), '\u00a513.50');
+
+// The window countdown: hours with zero-padded minutes, minutes alone under an hour.
+check('countdown pads minutes to two digits', testApi.formatCountdown(66 * 60_000), '1h06m');
+check('countdown drops minutes when they are zero', testApi.formatCountdown(2 * 60 * 60_000), '2h');
+check('countdown stays in minutes under an hour', testApi.formatCountdown(5 * 60_000), '5m');
+check('countdown never goes negative', testApi.formatCountdown(-1), '0m');
+check('countdown floors a partial minute', testApi.formatCountdown(90_000), '1m');
+check('countdown handles a long weekend window', testApi.formatCountdown(62 * 60 * 60_000), '62h');
 checkClose('off-peak flash output is half of peak', testApi.PRICE_TABLE['deepseek-flash'].output.offPeak * 2, testApi.PRICE_TABLE['deepseek-flash'].output.peak);
 checkClose('off-peak pro cache-hit is half of peak', testApi.PRICE_TABLE['deepseek-v4-pro'].cacheHit.offPeak * 2, testApi.PRICE_TABLE['deepseek-v4-pro'].cacheHit.peak);
 checkClose('off-peak pro cache-miss is half of peak', testApi.PRICE_TABLE['deepseek-v4-pro'].cacheMiss.offPeak * 2, testApi.PRICE_TABLE['deepseek-v4-pro'].cacheMiss.peak);
@@ -419,19 +430,23 @@ check('spend cell shows an em dash before any delta', pillCells(latest.tree), ['
 clickPill();
 await settle();
 check('card shows the wallet split', pillText(latest.tree).includes('\u5145\u503c\u94b1\u5305'), true);
-// The card quotes the window that is active, so the reader sees the rates in force.
-check('card quotes the active period', pillText(latest.tree).includes('\u65f6\u6bb5'), true);
+// The card stays to the essentials: the active window and its three rates.
 check('card quotes cache-hit pricing', pillText(latest.tree).includes('\u7f13\u5b58\u547d\u4e2d'), true);
 check('card quotes cache-miss pricing', pillText(latest.tree).includes('\u7f13\u5b58\u672a\u547d\u4e2d'), true);
 check('card quotes output pricing', pillText(latest.tree).includes('\u8f93\u51fa'), true);
-check('card states the price unit', pillText(latest.tree).includes('\u5143 / \u767e\u4e07 tokens'), true);
-check('card names the model its rates come from', pillText(latest.tree).includes('deepseek-flash'), true);
-// The version stays in the footer, and the prose the reader had removed is still gone.
+check('card notes the price unit in small grey text', pillText(latest.tree).includes('\u5355\u4f4d\uff1a\u5143 / \u767e\u4e07 tokens'), true);
+// The period cell counts the window down instead of naming the clock time it ends at.
+check('card shows a window countdown', /(\d+h)?\d+m\b/.test(pillText(latest.tree)), true);
+// Rates are all two-decimal, so no rate may render as a bare integer.
+check('no rate renders without decimals', /¥\d+\s/.test(pillText(latest.tree).replace(/¥\d+\.\d{2}/g, '')), false);
+// The version rides the action row now, and the prose the reader removed stays gone.
 {
   const notes = cardNotes(latest.tree);
-  check('grey footer carries the version', notes.includes('v' + PLUGIN_VERSION), true);
   check('grey footer omits the old account explanation', notes.some((line) => line.includes('\u4e0e\u8bbe\u7f6e')), false);
+  check('card no longer explains the holiday rule', pillText(latest.tree).includes('\u672a\u8ba1\u5165'), false);
+  check('card no longer names the pricing model', pillText(latest.tree).includes('\u4ef7\u683c\u4f9d\u636e'), false);
 }
+check('card still carries the version marker', pillText(latest.tree).includes('v' + PLUGIN_VERSION), true);
 
 // A second read with no movement reports an explicit zero delta rather than
 // holding the figure back.

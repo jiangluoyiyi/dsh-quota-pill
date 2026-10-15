@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({
      * Build identity, stamped in the detail card only: the pill stays limited to the
      * two figures, while the card remains available to prove which revision a page runs.
      */
-    const PLUGIN_VERSION = '0.1.8';
+    const PLUGIN_VERSION = '0.1.9';
 
     /** Build-time client identity the Platform headers carry. */
     const CLIENT_VERSION =
@@ -156,13 +156,13 @@ window.__ModuleLoader__.load({
       '.dqp_cardTitle{color:var(--dsw-alias-label-secondary);margin:0 0 6px;font-weight:600}',
       '.dqp_row{display:flex;justify-content:space-between;gap:16px}',
       '.dqp_rowValue{font-variant-numeric:tabular-nums;white-space:nowrap}',
-      // Grouping inside the card: the active pricing period and its rates.
+      // Grouping inside the card: the active window and its three rates.
       '.dqp_section{margin:8px 0 0;padding-top:7px;border-top:1px solid var(--dsw-alias-border-l1)}',
-      '.dqp_sectionTitle{color:var(--dsw-alias-label-secondary);margin:0 0 4px;font-weight:600}',
-      '.dqp_rate{padding-left:10px}',
+      '.dqp_unit{color:var(--dsw-alias-label-secondary);font-size:.92em;margin:3px 0 0}',
       '.dqp_note{color:var(--dsw-alias-label-secondary);margin:6px 0 0}',
       '.dqp_error{color:var(--dsw-alias-state-error-primary);margin:6px 0 0}',
-      '.dqp_actions{display:flex;justify-content:flex-end;gap:8px;margin:8px 0 0}',
+      '.dqp_actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 0}',
+      '.dqp_version{color:var(--dsw-alias-label-secondary);font-size:.92em}',
       '.dqp_action{font:inherit;color:var(--dsw-alias-brand-primary);background:0 0;border:none;border-radius:6px;padding:2px 6px;cursor:pointer}',
       '.dqp_action:hover{background:var(--dsw-alias-bg-layer-2)}',
     ].join('');
@@ -204,16 +204,12 @@ window.__ModuleLoader__.load({
             pillUnknownValue: '—',
             peakLabel: '峰',
             offPeakLabel: '谷',
-            period: '时段',
             periodPeak: '高峰',
             periodOffPeak: '空闲',
-            periodUntil: '至',
             priceCacheHit: '缓存命中',
             priceCacheMiss: '缓存未命中',
             priceOutput: '输出',
-            priceUnit: '元 / 百万 tokens',
-            priceBasedOn: '价格依据',
-            priceCaveat: '未计入中国法定节假日；峰时为北京时间周一至周五 9:00–12:00、14:00–18:00',
+            priceUnit: '单位：元 / 百万 tokens',
           }
         : {
             balance: 'Balance',
@@ -233,16 +229,12 @@ window.__ModuleLoader__.load({
             pillUnknownValue: '—',
             peakLabel: 'Peak',
             offPeakLabel: 'Off-peak',
-            period: 'Period',
             periodPeak: 'Peak',
             periodOffPeak: 'Off-peak',
-            periodUntil: 'until',
             priceCacheHit: 'Cache hit',
             priceCacheMiss: 'Cache miss',
             priceOutput: 'Output',
-            priceUnit: 'CNY / 1M tokens',
-            priceBasedOn: 'Rates for',
-            priceCaveat: 'Chinese public holidays are not accounted for; peak is Mon-Fri 9:00-12:00 and 14:00-18:00 Beijing time',
+            priceUnit: 'Unit: CNY / 1M tokens',
           };
     }
 
@@ -267,14 +259,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One list price per million tokens, e.g. `¥0.02` or `¥4.5`. Sub-cent rates keep
-     * their significant decimals instead of collapsing to `<0.01`.
+     * One list price per million tokens, always with two decimals so the rows stay
+     * vertically aligned whatever the magnitude: `¥0.02`, `¥2.00`, `¥13.50`.
      * @param value - price in the currency unit.
      * @returns display string.
      */
     function formatRate(value) {
-      const decimals = value >= 1 ? (Number.isInteger(value) ? 0 : 1) : String(value).split('.')[1]?.length ?? 0;
-      return '¥' + value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: 4 });
+      return '¥' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    /**
+     * A remaining window as a compact countdown: hours with zero-padded minutes, or
+     * minutes alone under an hour, e.g. `2h`, `1h06m`, `5m`. Windows are hours long,
+     * so a countdown never needs second precision.
+     * @param ms - remaining milliseconds; non-positive values read as `0m`.
+     * @returns display string.
+     */
+    function formatCountdown(ms) {
+      if (!Number.isFinite(ms) || ms <= 0) return '0m';
+      const totalMinutes = Math.floor(ms / 60_000);
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      if (hours === 0) return minutes + 'm';
+      if (minutes === 0) return hours + 'h';
+      return hours + 'h' + String(minutes).padStart(2, '0') + 'm';
     }
 
     /** Sum wallets per currency so a mixed-currency account stays additive per unit. */
@@ -671,11 +679,9 @@ window.__ModuleLoader__.load({
       const bounds = peakWindowBounds(now);
       const rates = PRICE_TABLE[PRICING_MODEL] ?? PRICE_TABLE['deepseek-flash'];
       const priceKey = peakNow ? 'peak' : 'offPeak';
-      const untilText = new Date(bounds.until).toLocaleString(undefined, {
-        weekday: 'short',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      // The reader's question is "how much longer is this window", so the cell shows
+      // the time remaining rather than the clock time it ends at.
+      const remainingText = formatCountdown(bounds.until - now);
 
       const card = open
         ? h(
@@ -697,26 +703,23 @@ window.__ModuleLoader__.load({
                   ),
             ),
             spendText === null ? null : h(Row, { label: t.spend, value: spendText }),
-            // The active pricing window and the list price it implies. The period
-            // is derivable from the clock, so it is stated before the numbers.
+            // Only what the figures cannot say themselves: which pricing window is in
+            // force, how long it lasts, and the three rates that apply to it. The
+            // rules behind them live in the README, not in the card.
             h(
               'div',
               { className: 'dqp_section' },
-              h('p', { className: 'dqp_sectionTitle' }, t.period),
               h(Row, {
                 label: peakNow ? t.periodPeak : t.periodOffPeak,
-                value: t.periodUntil + ' ' + untilText,
+                value: remainingText,
               }),
-              h('p', { className: 'dqp_note' }, t.priceBasedOn + ' ' + PRICING_MODEL),
+              // Rate rows sit flush with the period row above them: the grouping is
+              // already carried by that row, so indentation only costs alignment.
               h(Row, { label: t.priceCacheHit, value: formatRate(rates.cacheHit[priceKey]) }),
-              h('div', { className: 'dqp_rate' }, h(Row, { label: t.priceCacheMiss, value: formatRate(rates.cacheMiss[priceKey]) })),
-              h('div', { className: 'dqp_rate' }, h(Row, { label: t.priceOutput, value: formatRate(rates.output[priceKey]) })),
-              h(Row, { label: '', value: t.priceUnit }),
-              h('p', { className: 'dqp_note' }, t.priceCaveat),
+              h(Row, { label: t.priceCacheMiss, value: formatRate(rates.cacheMiss[priceKey]) }),
+              h(Row, { label: t.priceOutput, value: formatRate(rates.output[priceKey]) }),
+              h('p', { className: 'dqp_unit' }, t.priceUnit),
             ),
-            // Proof of which bundle revision this page is running: a stale page
-            // cannot show the version its author just wrote.
-            h('p', { className: 'dqp_note' }, 'v' + PLUGIN_VERSION),
             failed && probe !== null ? h('p', { className: 'dqp_note' }, 'RPC: ' + probe) : null,
             failed
               ? h('p', { className: 'dqp_error' }, state.reason ?? t.loadFailed)
@@ -729,6 +732,9 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'dqp_actions' },
+              // The revision rides the action row instead of a line of its own: it
+              // still proves which bundle a page runs, at no cost to the reading.
+              h('span', { className: 'dqp_version' }, 'v' + PLUGIN_VERSION),
               h(
                 'button',
                 { type: 'button', className: 'dqp_action', onClick: manualRefresh },
@@ -792,7 +798,7 @@ window.__ModuleLoader__.load({
        * Pure schedule helpers, exported so the verification script can exercise the
        * weekday/hour boundaries directly instead of trusting the rendered badge.
        */
-      __test: { isPeakAt, peakWindowBounds, formatRate, PRICE_TABLE },
+      __test: { isPeakAt, peakWindowBounds, formatRate, formatCountdown, PRICE_TABLE },
       apply(pluginCtx) {
         // The component runs after this, and needs the mounted context to reach the
         // account namespace; the Cordis context passed to apply is the only owner of

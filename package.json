@@ -1,6 +1,6 @@
 {
   "name": "dsh-quota-pill",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "Shows the DeepSeek account balance, the current Session's credit spend, and peak/off-peak pricing beside the shipped composer stats.",
