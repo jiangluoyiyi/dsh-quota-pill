@@ -2,6 +2,8 @@
 
 在 DSH Web 界面的 **composer 下方**常驻显示 DeepSeek 账号余额与「本次会话」额度消耗，位置与 DSH 自带的统计药丸（耗时 / token）并排。
 
+仓库：<https://github.com/jiangluoyiyi/dsh-quota-pill>
+
 这是一个**本地 bundle**：安装进当前 profile 后对所有会话生效，逻辑只有客户端半边，不注册任何 Host 服务、不下发工具、不进入模型上下文。
 
 ```
@@ -38,8 +40,16 @@
 
 ## 安装
 
+本机开发目录（本仓库已链接进 profile）：
+
 ```text
 plugin_manager { action: "install_bundle", target: "<本目录绝对路径>" }
+```
+
+从 GitHub 安装（`install_bundle` 支持 git URL，会在 profile 内克隆）：
+
+```text
+plugin_manager { action: "install_bundle", target: "https://github.com/jiangluoyiyi/dsh-quota-pill" }
 ```
 
 安装后**刷新一次页面**（`Ctrl+Shift+R` 或菜单重载）才会看到药丸。之后的代码改动由宿主侧的 bundle 轮询（默认 500ms 比较 mtime/ctime/size）自动发布给已打开的页面。
