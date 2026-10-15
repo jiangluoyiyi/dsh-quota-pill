@@ -48,6 +48,21 @@ function check(label, actual, expected) {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${label} -> ${JSON.stringify(actual)}`);
 }
 
+/** Compare an epoch millisecond value to an ISO instant, to the second. */
+function checkInstant(label, actual, expectedIso) {
+  const expected = Date.parse(expectedIso);
+  const ok = Math.abs(actual - expected) < 1000;
+  if (!ok) failures.push(`${label}: expected ${expectedIso}, got ${new Date(actual).toISOString()}`);
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${label} -> ${new Date(actual).toISOString()}`);
+}
+
+/** Compare two numbers within a tolerance, for derived prices. */
+function checkClose(label, actual, expected) {
+  const ok = Math.abs(actual - expected) < 1e-9;
+  if (!ok) failures.push(`${label}: expected ${expected}, got ${actual}`);
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${label} -> ${actual}`);
+}
+
 /* ---------------- React hook runtime ---------------- */
 
 const hookSlots = [];
@@ -144,7 +159,9 @@ async function settle() {
     commit(latest.props);
   }
   throw new Error('render did not settle');
+
 }
+
 
 /* ---------------- load the bundle as the loader does ---------------- */
 
@@ -247,6 +264,15 @@ function elementsWithClass(tree, className) {
   return found;
 }
 
+/** The first rendered element matching `predicate`, for subtree-scoped assertions. */
+function findFirst(tree, predicate) {
+  let found = null;
+  walkTree(tree, (node) => {
+    if (found === null && typeof node[0] === 'string' && predicate(node)) found = node;
+  });
+  return found;
+}
+
 /**
  * The pill's two cells as "label value", read from its column structure, so this
  * also asserts their order: balance first, spend second.
@@ -299,7 +325,84 @@ const first = commit(props);
 check('mount render does not crash', Array.isArray(first), true);
 check('mount phase', first[1]['data-quota-pill'], 'loading');
 
+/* ---------------- peak / off-peak schedule and list prices ---------------- */
+
+// Constructed boundaries in Beijing time, since the schedule is defined there and
+// this machine's own zone must not decide the result.
+const CN = 8 * 60;
+const atBeijing = (iso, hour, minute = 0) => Date.parse(`${iso}T00:00:00Z`) + (hour * 60 + minute - CN) * 60_000;
+const testApi = plugin.__test;
+check('schedule helpers exported', typeof testApi?.isPeakAt, 'function');
+
+// A normal Wednesday, across every boundary of the two peak windows.
+const wed = '2026-10-14';
+check('Wed 08:59 is off-peak', testApi.isPeakAt(atBeijing(wed, 8, 59)), false);
+check('Wed 09:00 is peak', testApi.isPeakAt(atBeijing(wed, 9, 0)), true);
+check('Wed 11:59 is peak', testApi.isPeakAt(atBeijing(wed, 11, 59)), true);
+check('Wed 12:00 is off-peak', testApi.isPeakAt(atBeijing(wed, 12, 0)), false);
+check('Wed 13:59 is off-peak', testApi.isPeakAt(atBeijing(wed, 13, 59)), false);
+check('Wed 14:00 is peak', testApi.isPeakAt(atBeijing(wed, 14, 0)), true);
+check('Wed 17:59 is peak', testApi.isPeakAt(atBeijing(wed, 17, 59)), true);
+check('Wed 18:00 is off-peak', testApi.isPeakAt(atBeijing(wed, 18, 0)), false);
+check('Wed 23:30 is off-peak', testApi.isPeakAt(atBeijing(wed, 23, 30)), false);
+
+// Weekends are off-peak in full, including hours that are peak on a weekday.
+check('Sat 10:00 is off-peak', testApi.isPeakAt(atBeijing('2026-10-17', 10, 0)), false);
+check('Sun 15:00 is off-peak', testApi.isPeakAt(atBeijing('2026-10-18', 15, 0)), false);
+
+// The boundary the badge reports, in the reader's own timezone.
+checkInstant(
+  'Wed 10:00 counts down to 12:00 Beijing',
+  testApi.peakWindowBounds(atBeijing(wed, 10, 0)).until,
+  '2026-10-14T04:00:00Z',
+);
+checkInstant(
+  'Wed 20:00 counts down to Thursday 09:00 Beijing',
+  testApi.peakWindowBounds(atBeijing(wed, 20, 0)).until,
+  '2026-10-15T01:00:00Z',
+);
+checkInstant(
+  'Saturday counts down to Monday 09:00 Beijing',
+  testApi.peakWindowBounds(atBeijing('2026-10-17', 12, 0)).until,
+  '2026-10-19T01:00:00Z',
+);
+checkInstant(
+  'Friday evening counts down to Monday 09:00 Beijing',
+  testApi.peakWindowBounds(atBeijing('2026-10-16', 22, 0)).until,
+  '2026-10-19T01:00:00Z',
+);
+check('peak window reports its kind', testApi.peakWindowBounds(atBeijing(wed, 10, 0)).kind, 'peak');
+
+// The offset is a parameter, so one instant classifies differently per timezone:
+// 01:00Z is 09:00 Beijing, which is the first peak window, and 01:00 for a
+// schedule priced in UTC, which is inside neither window.
+check('01:00Z is peak under Beijing rules', testApi.isPeakAt(Date.parse('2026-10-14T01:00:00Z')), true);
+check('01:00Z is off-peak under UTC rules', testApi.isPeakAt(Date.parse('2026-10-14T01:00:00Z'), 0), false);
+
+/* ---------------- list prices ---------------- */
+
+check('rate formatting keeps significant decimals', testApi.formatRate(0.02), '\u00a50.02');
+check('rate formatting drops decimals for whole yuan', testApi.formatRate(2), '\u00a52');
+check('rate formatting keeps one decimal', testApi.formatRate(4.5), '\u00a54.5');
+checkClose('off-peak flash output is half of peak', testApi.PRICE_TABLE['deepseek-flash'].output.offPeak * 2, testApi.PRICE_TABLE['deepseek-flash'].output.peak);
+checkClose('off-peak pro cache-hit is half of peak', testApi.PRICE_TABLE['deepseek-v4-pro'].cacheHit.offPeak * 2, testApi.PRICE_TABLE['deepseek-v4-pro'].cacheHit.peak);
+checkClose('off-peak pro cache-miss is half of peak', testApi.PRICE_TABLE['deepseek-v4-pro'].cacheMiss.offPeak * 2, testApi.PRICE_TABLE['deepseek-v4-pro'].cacheMiss.peak);
+checkClose('off-peak pro output is half of peak', testApi.PRICE_TABLE['deepseek-v4-pro'].output.offPeak * 2, testApi.PRICE_TABLE['deepseek-v4-pro'].output.peak);
+checkClose('off-peak flash cache-hit is half of peak', testApi.PRICE_TABLE['deepseek-flash'].cacheHit.offPeak * 2, testApi.PRICE_TABLE['deepseek-flash'].cacheHit.peak);
+checkClose('off-peak flash cache-miss is half of peak', testApi.PRICE_TABLE['deepseek-flash'].cacheMiss.offPeak * 2, testApi.PRICE_TABLE['deepseek-flash'].cacheMiss.peak);
+
+
 await settle();
+
+// The pill carries the marker, and it always states exactly one of the two windows.
+// Asserted on the pill subtree only: the open card names both windows in its copy,
+// so a whole-tree search would match both markers.
+{
+  const pillNode = findFirst(latest.tree, (node) => node[1]?.className?.includes?.('dqp_pill'));
+  const pillOnly = pillText(pillNode);
+  check('pill marker present', pillOnly.includes('\u5cf0') || pillOnly.includes('\u8c37'), true);
+  check('pill states exactly one period', pillOnly.includes('\u5cf0') !== pillOnly.includes('\u8c37'), true);
+}
 check('exactly one balance call on mount', balanceCalls.length, 1);
 check('metadata version', balanceCalls[0].version, '0.2.0-rc.2');
 check('metadata locale', balanceCalls[0].locale, 'zh');
@@ -316,8 +419,19 @@ check('spend cell shows an em dash before any delta', pillCells(latest.tree), ['
 clickPill();
 await settle();
 check('card shows the wallet split', pillText(latest.tree).includes('\u5145\u503c\u94b1\u5305'), true);
-// The card's grey footer holds the version and nothing else.
-check('grey footer is only the version', cardNotes(latest.tree), ['v' + PLUGIN_VERSION]);
+// The card quotes the window that is active, so the reader sees the rates in force.
+check('card quotes the active period', pillText(latest.tree).includes('\u65f6\u6bb5'), true);
+check('card quotes cache-hit pricing', pillText(latest.tree).includes('\u7f13\u5b58\u547d\u4e2d'), true);
+check('card quotes cache-miss pricing', pillText(latest.tree).includes('\u7f13\u5b58\u672a\u547d\u4e2d'), true);
+check('card quotes output pricing', pillText(latest.tree).includes('\u8f93\u51fa'), true);
+check('card states the price unit', pillText(latest.tree).includes('\u5143 / \u767e\u4e07 tokens'), true);
+check('card names the model its rates come from', pillText(latest.tree).includes('deepseek-flash'), true);
+// The version stays in the footer, and the prose the reader had removed is still gone.
+{
+  const notes = cardNotes(latest.tree);
+  check('grey footer carries the version', notes.includes('v' + PLUGIN_VERSION), true);
+  check('grey footer omits the old account explanation', notes.some((line) => line.includes('\u4e0e\u8bbe\u7f6e')), false);
+}
 
 // A second read with no movement reports an explicit zero delta rather than
 // holding the figure back.

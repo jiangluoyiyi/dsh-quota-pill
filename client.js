@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({
      * Build identity, stamped in the detail card only: the pill stays limited to the
      * two figures, while the card remains available to prove which revision a page runs.
      */
-    const PLUGIN_VERSION = '0.1.7';
+    const PLUGIN_VERSION = '0.1.8';
 
     /** Build-time client identity the Platform headers carry. */
     const CLIENT_VERSION =
@@ -40,6 +40,97 @@ window.__ModuleLoader__.load({
     const RETRY_STEPS_MS = [20_000, 60_000, 120_000];
     const TURN_SETTLE_DELAY_MS = 4_000;
 
+    /**
+     * Peak/off-peak schedule, exactly as the official pricing page states it: Beijing
+     * time, Monday through Friday, 9:00-12:00 and 14:00-18:00, where off-peak costs
+     * half of peak. Chinese statutory holidays are excluded from peak, which a clock
+     * cannot know, so the marker states its own basis.
+     */
+    const PEAK_WINDOWS_HOURS = [
+      [9, 12],
+      [14, 18],
+    ];
+    const CN_OFFSET_MINUTES = 8 * 60;
+
+    /**
+     * Official CNY list prices per million tokens, read off the pricing page. These
+     * are list prices for accounting context, not this account's billed amounts.
+     */
+    const PRICE_TABLE = {
+      'deepseek-flash': {
+        cacheHit: { offPeak: 0.02, peak: 0.04 },
+        cacheMiss: { offPeak: 1, peak: 2 },
+        output: { offPeak: 4, peak: 8 },
+      },
+      'deepseek-v4-pro': {
+        cacheHit: { offPeak: 0.15, peak: 0.3 },
+        cacheMiss: { offPeak: 4.5, peak: 9 },
+        output: { offPeak: 13.5, peak: 27 },
+      },
+    };
+
+    /** Which model's list price the card quotes; the Model Experience default. */
+    const PRICING_MODEL =
+      (typeof globalThis.__DSH_QUOTA_PILL_MODEL__ === 'string' && globalThis.__DSH_QUOTA_PILL_MODEL__) ||
+      'deepseek-flash';
+
+    /**
+     * Whether one instant falls in a peak window, evaluated in Beijing time.
+     * @param at - milliseconds since epoch.
+     * @param utcOffsetMinutes - offset of the pricing timezone; defaults to Beijing.
+     * @returns true while peak pricing applies.
+     */
+    function isPeakAt(at, utcOffsetMinutes = CN_OFFSET_MINUTES) {
+      const local = new Date(at + utcOffsetMinutes * 60_000);
+      const day = local.getUTCDay();
+      if (day === 0 || day === 6) return false;
+      const hour = local.getUTCHours();
+      return PEAK_WINDOWS_HOURS.some(([from, to]) => hour >= from && hour < to);
+    }
+
+    /**
+     * The window in effect right now, derived from the same day/hour boundaries the
+     * schedule is defined by rather than from a repeated table.
+     * @param at - milliseconds since epoch.
+     * @param utcOffsetMinutes - offset of the pricing timezone; defaults to Beijing.
+     * @returns the current kind and the next boundary in epoch milliseconds, or null
+     * when the current window never ends (an entire weekend, or a whole holiday).
+     */
+    function peakWindowBounds(at, utcOffsetMinutes = CN_OFFSET_MINUTES) {
+      const local = new Date(at + utcOffsetMinutes * 60_000);
+      const day = local.getUTCDay();
+      const hour = local.getUTCHours();
+      const toEpoch = (value) => value.getTime() - utcOffsetMinutes * 60_000;
+
+      // Weekends are off-peak in full and run into Monday's first peak window.
+      if (day === 0 || day === 6) {
+        const next = new Date(local);
+        next.setUTCDate(next.getUTCDate() + (day === 6 ? 2 : 1));
+        next.setUTCHours(PEAK_WINDOWS_HOURS[0][0], 0, 0, 0);
+        return { kind: 'off', until: toEpoch(next) };
+      }
+
+      const peak = PEAK_WINDOWS_HOURS.find(([from, to]) => hour >= from && hour < to);
+      if (peak !== undefined) {
+        const end = new Date(local);
+        end.setUTCHours(peak[1], 0, 0, 0);
+        return { kind: 'peak', until: toEpoch(end) };
+      }
+
+      const next = PEAK_WINDOWS_HOURS.find(([from]) => from > hour);
+      if (next !== undefined) {
+        const start = new Date(local);
+        start.setUTCHours(next[0], 0, 0, 0);
+        return { kind: 'off', until: toEpoch(start) };
+      }
+
+      // Past the last window on a weekday: the next peak is Monday's first window.
+      const start = new Date(local);
+      start.setUTCDate(start.getUTCDate() + (day === 5 ? 3 : 1));
+      start.setUTCHours(PEAK_WINDOWS_HOURS[0][0], 0, 0, 0);
+      return { kind: 'off', until: toEpoch(start) };
+    }
+
     const STYLE_ID = 'dsh-quota-pill/quota-pill.css';
     const CSS = [
       '.dqp_root{box-sizing:border-box;min-width:0;max-width:100%;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));justify-content:center;display:flex}',
@@ -50,6 +141,10 @@ window.__ModuleLoader__.load({
       '.dqp_pill svg{flex:none;width:14px;height:14px}',
       '.dqp_stale{color:var(--dsw-alias-state-warn-primary)}',
       '.dqp_failed{color:var(--dsw-alias-state-error-primary)}',
+      // Peak pricing is the state worth noticing, so it takes the warning colour;
+      // off-peak stays muted like the rest of the pill.
+      '.dqp_peak{color:var(--dsw-alias-state-warn-primary)}',
+      '.dqp_off{color:var(--dsw-alias-label-secondary);opacity:.72}',
       '.dqp_label{text-overflow:ellipsis;min-width:0;overflow:hidden}',
       // Two label/value pairs with tabular figures, so the digits line up between
       // the two cells and stay put as the numbers change.
@@ -57,10 +152,14 @@ window.__ModuleLoader__.load({
       '.dqp_key{color:var(--dsw-alias-label-secondary)}',
       '.dqp_val{font-variant-numeric:tabular-nums}',
       '.dqp_sep{color:var(--dsw-alias-label-secondary);margin:0 7px;opacity:.45}',
-      '.dqp_card{position:absolute;bottom:calc(100% + 8px);right:0;z-index:40;box-sizing:border-box;min-width:236px;max-width:320px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 8px 24px rgb(0 0 0 / 18%);color:var(--dsw-alias-label-primary);font:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.5;text-align:left;white-space:normal}',
+      '.dqp_card{position:absolute;bottom:calc(100% + 8px);right:0;z-index:40;box-sizing:border-box;min-width:266px;max-width:340px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 8px 24px rgb(0 0 0 / 18%);color:var(--dsw-alias-label-primary);font:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.5;text-align:left;white-space:normal}',
       '.dqp_cardTitle{color:var(--dsw-alias-label-secondary);margin:0 0 6px;font-weight:600}',
       '.dqp_row{display:flex;justify-content:space-between;gap:16px}',
-      '.dqp_rowValue{font-variant-numeric:tabular-nums}',
+      '.dqp_rowValue{font-variant-numeric:tabular-nums;white-space:nowrap}',
+      // Grouping inside the card: the active pricing period and its rates.
+      '.dqp_section{margin:8px 0 0;padding-top:7px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.dqp_sectionTitle{color:var(--dsw-alias-label-secondary);margin:0 0 4px;font-weight:600}',
+      '.dqp_rate{padding-left:10px}',
       '.dqp_note{color:var(--dsw-alias-label-secondary);margin:6px 0 0}',
       '.dqp_error{color:var(--dsw-alias-state-error-primary);margin:6px 0 0}',
       '.dqp_actions{display:flex;justify-content:flex-end;gap:8px;margin:8px 0 0}',
@@ -103,6 +202,18 @@ window.__ModuleLoader__.load({
             pillBalance: '余额',
             pillSpend: '消耗',
             pillUnknownValue: '—',
+            peakLabel: '峰',
+            offPeakLabel: '谷',
+            period: '时段',
+            periodPeak: '高峰',
+            periodOffPeak: '空闲',
+            periodUntil: '至',
+            priceCacheHit: '缓存命中',
+            priceCacheMiss: '缓存未命中',
+            priceOutput: '输出',
+            priceUnit: '元 / 百万 tokens',
+            priceBasedOn: '价格依据',
+            priceCaveat: '未计入中国法定节假日；峰时为北京时间周一至周五 9:00–12:00、14:00–18:00',
           }
         : {
             balance: 'Balance',
@@ -120,6 +231,18 @@ window.__ModuleLoader__.load({
             pillBalance: 'Balance',
             pillSpend: 'Spent',
             pillUnknownValue: '—',
+            peakLabel: 'Peak',
+            offPeakLabel: 'Off-peak',
+            period: 'Period',
+            periodPeak: 'Peak',
+            periodOffPeak: 'Off-peak',
+            periodUntil: 'until',
+            priceCacheHit: 'Cache hit',
+            priceCacheMiss: 'Cache miss',
+            priceOutput: 'Output',
+            priceUnit: 'CNY / 1M tokens',
+            priceBasedOn: 'Rates for',
+            priceCaveat: 'Chinese public holidays are not accounted for; peak is Mon-Fri 9:00-12:00 and 14:00-18:00 Beijing time',
           };
     }
 
@@ -141,6 +264,17 @@ window.__ModuleLoader__.load({
       if (abs > 0 && abs < 0.01) return sign + currencySign(currency) + '<0.01';
       const text = abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       return sign + currencySign(currency) + text;
+    }
+
+    /**
+     * One list price per million tokens, e.g. `¥0.02` or `¥4.5`. Sub-cent rates keep
+     * their significant decimals instead of collapsing to `<0.01`.
+     * @param value - price in the currency unit.
+     * @returns display string.
+     */
+    function formatRate(value) {
+      const decimals = value >= 1 ? (Number.isInteger(value) ? 0 : 1) : String(value).split('.')[1]?.length ?? 0;
+      return '¥' + value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: 4 });
     }
 
     /** Sum wallets per currency so a mixed-currency account stays additive per unit. */
@@ -443,6 +577,9 @@ window.__ModuleLoader__.load({
       const t = React.useMemo(() => dict(), []);
       const [open, setOpen] = React.useState(false);
       const [probe, setProbe] = React.useState(null);
+      // Peak pricing changes on wall-clock boundaries, so the badge has its own
+      // ticking state rather than refreshing only when a balance read happens.
+      const [now, setNow] = React.useState(() => Date.now());
       const store = React.useMemo(() => createQuotaStore(ctx), []);
       const [state, setState] = React.useState(() => store.snapshot());
 
@@ -458,6 +595,13 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const removeStyles = insertStyles();
         return removeStyles;
+      }, []);
+
+      // The schedule only moves on the minute, so a minute is a sufficient tick; the
+      // value stays exact for anything derived from it because the clock is re-read.
+      React.useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 30_000);
+        return () => clearInterval(timer);
       }, []);
 
       React.useEffect(() => {
@@ -523,6 +667,16 @@ window.__ModuleLoader__.load({
       const pillClass =
         'dqp_pill' + (failed ? (stale ? ' dqp_stale' : ' dqp_failed') : signOut || unavailable ? ' dqp_stale' : '');
 
+      const peakNow = isPeakAt(now);
+      const bounds = peakWindowBounds(now);
+      const rates = PRICE_TABLE[PRICING_MODEL] ?? PRICE_TABLE['deepseek-flash'];
+      const priceKey = peakNow ? 'peak' : 'offPeak';
+      const untilText = new Date(bounds.until).toLocaleString(undefined, {
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
       const card = open
         ? h(
             'div',
@@ -543,6 +697,23 @@ window.__ModuleLoader__.load({
                   ),
             ),
             spendText === null ? null : h(Row, { label: t.spend, value: spendText }),
+            // The active pricing window and the list price it implies. The period
+            // is derivable from the clock, so it is stated before the numbers.
+            h(
+              'div',
+              { className: 'dqp_section' },
+              h('p', { className: 'dqp_sectionTitle' }, t.period),
+              h(Row, {
+                label: peakNow ? t.periodPeak : t.periodOffPeak,
+                value: t.periodUntil + ' ' + untilText,
+              }),
+              h('p', { className: 'dqp_note' }, t.priceBasedOn + ' ' + PRICING_MODEL),
+              h(Row, { label: t.priceCacheHit, value: formatRate(rates.cacheHit[priceKey]) }),
+              h('div', { className: 'dqp_rate' }, h(Row, { label: t.priceCacheMiss, value: formatRate(rates.cacheMiss[priceKey]) })),
+              h('div', { className: 'dqp_rate' }, h(Row, { label: t.priceOutput, value: formatRate(rates.output[priceKey]) })),
+              h(Row, { label: '', value: t.priceUnit }),
+              h('p', { className: 'dqp_note' }, t.priceCaveat),
+            ),
             // Proof of which bundle revision this page is running: a stale page
             // cannot show the version its author just wrote.
             h('p', { className: 'dqp_note' }, 'v' + PLUGIN_VERSION),
@@ -591,6 +762,9 @@ window.__ModuleLoader__.load({
               onClick: () => setOpen((value) => !value),
             },
             h(WalletIcon, null),
+            // Peak/off-peak marker: the pricing state that changes how fast credit
+            // drains, placed before the figures it qualifies.
+            h('span', { className: peakNow ? 'dqp_peak' : 'dqp_off' }, peakNow ? t.peakLabel : t.offPeakLabel),
             // Two fixed cells: the spend cell shows an em dash until a delta can be
             // computed, so the pill never grows or jumps when the first turn lands.
             h(
@@ -614,6 +788,11 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'remote', 'remote.account', 'locale'],
+      /**
+       * Pure schedule helpers, exported so the verification script can exercise the
+       * weekday/hour boundaries directly instead of trusting the rendered badge.
+       */
+      __test: { isPeakAt, peakWindowBounds, formatRate, PRICE_TABLE },
       apply(pluginCtx) {
         // The component runs after this, and needs the mounted context to reach the
         // account namespace; the Cordis context passed to apply is the only owner of
